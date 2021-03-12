@@ -9,8 +9,8 @@ type
 
   TSunPosition = class
   private const
-    fDefaultLatitude = 50.827847;  // Chemnitz
-    fDefaultLongitude = 12.921370; //
+    fDefaultLatitude =   40.730610;  // New York
+    fDefaultLongitude = -73.935242; //
 
     fOfficial = 90 + (50 / 60);
     fCivil = 96.0;
