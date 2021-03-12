@@ -1878,7 +1878,7 @@ begin
   scaleMat.mat[2, 2] := vec.z;
   scaleMat.mat[3, 3] := 1;
 
-  Result := Self * scaleMat;
+  Result := scaleMat * Self;
 end;
 
 function TMat4.Scale(Factor: Single): TMat4;
@@ -1934,7 +1934,7 @@ begin
   translateMat.mat[3, 2] := vec.z;
   translateMat.mat[3, 3] := 1;
 
-  Result := Self * translateMat;
+  Result := translateMat * Self;
 end;
 
 function TMat4.Translate(x, y, z: Single): TMat4;
@@ -1947,7 +1947,7 @@ begin
   translateMat.mat[3, 2] := z;
   translateMat.mat[3, 3] := 1;
 
-  Result := Self * translateMat;
+  Result := translateMat * Self;
 end;
 
 {$ENDREGION}

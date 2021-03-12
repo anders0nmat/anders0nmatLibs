@@ -3,7 +3,7 @@ unit ObjectGL;
 interface
 
 uses dglOpenGL, OpenMath, Generics.Collections, SysUtils, Math, Classes,
-     StrUtils, FMX.Graphics;
+     StrUtils, FMX.Graphics, FreeTypeDelphi;
 
 type
   EShaderCompile = class(Exception);
@@ -16,12 +16,19 @@ type
   private
     fID: TGLuint;
 
-    function LoadShader(Path: String; ShaderType: GLuint): GLuint;
+    function LoadShader(ASourceBuf: TBytes; ShaderType: GLuint): GLuint;
     function LoadProgram(AVert, AFrag, AGeom: TGLuint): GLuint;
+
+    function LoadFromFile(AFile: String; ShaderType: GLuint): GLuint;
+    function LoadFromStream(AStream: TStream; ShaderType: GLuint): GLuint;
+    function LoadFromSource(ASource: String; ShaderType: GLuint): GLuint;
   public
-    constructor Create(VertexPath, FragmentPath, GeometryPath: String); overload;
-    constructor Create(VertexPath, FragmentPath: String); overload;
+    constructor Create(VertexPath, FragmentPath: String; GeometryPath: String = ''); overload;
+    constructor Create; overload;
     destructor Destroy; override;
+
+    procedure LoadFromFiles(VertexPath, FragmentPath: String; GeometryPath: String = '');
+    procedure LoadFromSources(VertexSource, FragmentSource: String; GeometrySource: String = '');
 
     class procedure Leave;
 
@@ -67,7 +74,12 @@ type
     procedure Transmit;
   end;
 
-  TGLBufferType = (btRGB = GL_RGB, btRGBA = GL_RGBA, btDepth24Stencil8 = GL_DEPTH24_STENCIL8);
+  TGLBufferType = (btRed              = GL_RED,
+                   btRG               = GL_RG,
+                   btRGB              = GL_RGB,
+                   btRGBA             = GL_RGBA,
+                   btDepthStencil     = GL_DEPTH_STENCIL
+                   );
   TGLAttachementType = (atColor0 = GL_COLOR_ATTACHMENT0, atColor1, atColor2, atColor3, atColor4,
                         atColor5, atColor6, atColor7, atColor8, atColor9, atColor10, atColor11,
                         atColor12, atColor13, atColor14, atColor15,
@@ -105,9 +117,13 @@ type
     constructor CreateFromFile(const APath: String; LoadFlipped: Boolean = false);
     constructor CreateFromStream(AStream: TStream; LoadFlipped: Boolean = false);
     constructor CreateFromBitmap(ABitmap: TBitmap; LoadFlipped: Boolean = false);
+    constructor CreateFromRawStream(AStream: TMemoryStream; ColorMode: GLuint;
+      InternalMode: TGLBufferType; Width, Height: Cardinal);
     procedure LoadFromFile(const APath: String; LoadFlipped: Boolean = false);
     procedure LoadFromStream(AStream: TStream; LoadFlipped: Boolean = false);
     procedure LoadFromBitmap(ABitmap: TBitmap; LoadFlipped: Boolean = false);
+    procedure LoadFromRawStream(AStream: TMemoryStream; ColorMode: GLuint;
+      InternalMode: TGLBufferType; Width, Height: Cardinal);
 
     procedure Initialize(AType: TGLBufferType; AWidth, AHeight: Cardinal); virtual;
 
@@ -237,13 +253,97 @@ type
     property Samples: GLuint read fSamples;
   end;
 
+  TGLTextRenderer = class
+  private const
+    vertexShader = '#version 330 core'#10 +
+                   'layout (location = 0) in vec3 aPos;'#10 +
+                   'layout (location = 1) in vec2 aTex;'#10 +
+                   'out vec2 texCoord;'#10 +
+                   'uniform mat4 scale;'#10 +
+                   'uniform mat4 position;'#10 +
+                   'uniform mat4 projection;'#10 +
+                   'void main() {'#10 +
+                   '	gl_Position = projection * position * scale * vec4(aPos.xy, 0.0, 1.0);'#10 +
+                   '	texCoord = aTex;'#10 +
+                   '}';
+    fragmentShader = '#version 330 core'#10 +
+                     'out vec4 FragColor;'#10 +
+                     'in vec2 texCoord;'#10 +
+                     'uniform sampler2D tex;'#10 +
+                     'uniform vec3 color;'#10 +
+                     'void main() {'#10 +
+                     '	FragColor = vec4(color.rgb, texture(tex, texCoord).r);'#10 +
+                     '}'; 
+  
+  private
+    fCharList: TDictionary<Char, TFreeTypeChar>;
+    fTextureList: TGLTextureList;
+    fShader: TGLShader;
+    fModel: TGLMesh;
+  public
+    constructor Create;
+    destructor Destroy; override;
+
+    procedure SetDrawSize(Left, Right, Bottom, Top: Single);
+
+    procedure RegisterChars(Chars: String; resolutionDPI: Word; Size: Cardinal; AFontFile: String);
+    procedure RenderText(AString: String; APosition: TVec2; AColor: TVec3; AScale: Single = 1);
+  end;
+
+const
+  quadMesh: array[0..29] of Single = (
+    0, 0, 0,    0, 0, 
+    0, 1, 0,    0, 1,
+    1, 0, 0,    1, 0,
+
+    1, 1, 0,    1, 1,
+    1, 0, 0,    1, 0,
+    0, 1, 0,    0, 1
+  );
+
 implementation
 
 {$REGION 'TGLShader'}
 
 constructor TGLShader.Create(VertexPath, FragmentPath, GeometryPath: String);
+begin
+  Create;
+  LoadFromFiles(VertexPath, FragmentPath, GeometryPath);
+end;
+
+constructor TGLShader.Create;
+begin
+  fID := 0;
+end;
+
+destructor TGLShader.Destroy;
+begin
+  glDeleteProgram(fID);
+  inherited;
+end;
+
+class procedure TGLShader.Leave;
+begin
+  glUseProgram(0);
+end;
+
+function TGLShader.LoadFromFile(AFile: String; ShaderType: GLuint): GLuint;
 var
-  vert, frag, geom: TGLuint;
+  stream: TFileStream;
+begin
+  Result := 0;
+  stream := TFileStream.Create(AFile, fmOpenRead or fmShareDenyWrite);
+  try
+    Result := LoadFromStream(stream, ShaderType);
+  finally
+    stream.Free;
+  end;
+end;
+
+procedure TGLShader.LoadFromFiles(VertexPath, FragmentPath,
+  GeometryPath: String);
+var
+  vert, frag, geom: GLuint;
 begin
   if not FileExists(VertexPath) then
     raise EFileNotFoundException.Create(VertexPath + ' not found');
@@ -255,10 +355,10 @@ begin
   geom := 0;
 
   try
-    vert := LoadShader(VertexPath, GL_VERTEX_SHADER);
-    frag := LoadShader(FragmentPath, GL_FRAGMENT_SHADER);
+    vert := LoadFromFile(VertexPath, GL_VERTEX_SHADER);
+    frag := LoadFromFile(FragmentPath, GL_FRAGMENT_SHADER);
     if FileExists(GeometryPath) then
-      geom := LoadShader(GeometryPath, GL_GEOMETRY_SHADER);
+      geom := LoadFromFile(GeometryPath, GL_GEOMETRY_SHADER);
 
     fID := LoadProgram(vert, frag, geom);
   finally
@@ -271,20 +371,59 @@ begin
   end;
 end;
 
-constructor TGLShader.Create(VertexPath, FragmentPath: String);
+function TGLShader.LoadFromSource(ASource: String; ShaderType: GLuint): GLuint;
+var
+  stream: TStringStream;
 begin
-  Create(VertexPath, FragmentPath, '');
+  Result := 0;
+  stream := TStringStream.Create(ASource);
+  try
+    Result := LoadFromStream(stream, ShaderType);
+  finally
+    stream.Free;
+  end;
 end;
 
-destructor TGLShader.Destroy;
+procedure TGLShader.LoadFromSources(VertexSource, FragmentSource,
+  GeometrySource: String);
+var
+  vert, frag, geom: GLuint;
 begin
-  glDeleteProgram(fID);
-  inherited;
+  if VertexSource = '' then
+    raise EShaderCompile.Create('VertexSource not valid');
+  if FragmentSource = '' then
+    raise EShaderCompile.Create('FragmentSource not valid');
+
+  vert := 0;
+  frag := 0;
+  geom := 0;
+
+  try
+    vert := LoadFromSource(VertexSource, GL_VERTEX_SHADER);
+    frag := LoadFromSource(FragmentSource, GL_FRAGMENT_SHADER);
+    if GeometrySource <> '' then
+      geom := LoadFromSource(GeometrySource, GL_GEOMETRY_SHADER);
+
+    fID := LoadProgram(vert, frag, geom);
+  finally
+    if vert <> 0 then
+      glDeleteShader(vert);
+    if frag <> 0 then
+      glDeleteShader(frag);
+    if geom <> 0 then
+      glDeleteShader(geom);
+  end;
+
 end;
 
-class procedure TGLShader.Leave;
+function TGLShader.LoadFromStream(AStream: TStream; ShaderType: GLuint): GLuint;
+var
+  buf: TBytes;
 begin
-  glUseProgram(0);
+  SetLength(buf, AStream.Size);
+  AStream.Position := 0;
+  AStream.Read(buf, Length(buf));
+  Result := LoadShader(buf, ShaderType);
 end;
 
 function TGLShader.LoadProgram(AVert, AFrag, AGeom: TGLuint): GLuint;
@@ -315,26 +454,19 @@ begin
   end;
 end;
 
-function TGLShader.LoadShader(Path: String; ShaderType: GLuint): GLuint;
+function TGLShader.LoadShader(ASourceBuf: TBytes; ShaderType: GLuint): GLuint;
 var
   fs: TFileStream;
-  buf: TBytes;
+  errbuf: TBytes;
   ps: PAnsiChar;
   status: TGLint;
   infoLog: String;
   len: Integer;
 begin
   Result := glCreateShader(ShaderType);
-  fs := TFileStream.Create(Path, fmOpenRead or fmShareDenyWrite);
-  try
-    SetLength(buf, fs.Size);
-    fs.ReadBuffer(buf, Length(buf));
-  finally
-    fs.Free;
-  end;
 
-  ps := PAnsiChar(@buf[0]);
-  len := Length(buf);
+  ps := PAnsiChar(@ASourceBuf[0]);
+  len := Length(ASourceBuf);
 
   glShaderSource(Result, 1, @ps, @len);
   glCompileShader(Result);
@@ -345,10 +477,10 @@ begin
     glGetShaderiv(Result, GL_INFO_LOG_LENGTH, @status);
     if status > 0 then
     begin
-      SetLength(buf, status);
-      glGetShaderInfoLog(Result, status, @status, @buf[0]);
+      SetLength(errbuf, status);
+      glGetShaderInfoLog(Result, status, @status, @errbuf[0]);
     end;
-    infoLog := TEncoding.UTF8.GetString(buf);
+    infoLog := TEncoding.UTF8.GetString(errbuf);
     raise EShaderCompile.Create(infoLog);
   end;
 end;
@@ -728,6 +860,13 @@ begin
   LoadFromFile(APath, LoadFlipped);
 end;
 
+constructor TGLTexture2D.CreateFromRawStream(AStream: TMemoryStream;
+  ColorMode: GLuint; InternalMode: TGLBufferType; Width, Height: Cardinal);
+begin
+  Create;
+  LoadFromRawStream(AStream, ColorMode, InternalMode, Width, Height);
+end;
+
 constructor TGLTexture2D.CreateFromStream(AStream: TStream;
   LoadFlipped: Boolean);
 begin
@@ -754,49 +893,13 @@ procedure TGLTexture2D.LoadFromBitmap(ABitmap: TBitmap; LoadFlipped: Boolean);
 var
   pic: TBitmap;
   bitPointer: TBitmapData;
-begin
-  pic := TBitmap.Create;
-  try
-    pic.Assign(ABitmap);
-    if LoadFlipped then
-      pic.FlipVertical;
-    pic.Map(TMapAccess.Read, bitPointer);
-    Activate;
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pic.Width, pic.Height,
-      0, GL_BGRA, GL_UNSIGNED_BYTE, bitPointer.Data);
-    pic.Unmap(bitPointer);
-    fType := TGLBufferType(GL_RGBA);
-    // default texture filtering. Without it textures will be black
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    Deactivate;
-  finally
-    pic.Free;
-  end;
-end;
-
-procedure TGLTexture2D.LoadFromFile(const APath: String; LoadFlipped: Boolean);
-var
-  Stream: TFileStream;
-begin
-  Stream := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
-  try
-    LoadFromStream(Stream, LoadFlipped);
-  finally
-    Stream.Free;
-  end;
-end;
-
-procedure TGLTexture2D.LoadFromStream(AStream: TStream; LoadFlipped: Boolean);
-var
-  pic: TBitmap;
-  bitPointer: TBitmapData;
   buf: TMemoryStream;
   i, bbl: Integer;
 begin
   buf := nil;
-  pic := TBitmap.CreateFromStream(AStream);
+  pic := TBitmap.Create;
   try
+    pic.Assign(ABitmap);
     if LoadFlipped then
       pic.FlipVertical;
 
@@ -810,17 +913,50 @@ begin
 
     pic.Unmap(bitPointer);
 
-    Activate;
-
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pic.Width, pic.Height,
-      0, GL_BGRA, GL_UNSIGNED_BYTE, buf.Memory);
-    fType := TGLBufferType(GL_RGBA);
-    // default texture filtering. Without it textures will be black
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    Deactivate;
+    LoadFromRawStream(buf, GL_BGRA, btRGBA, pic.Width, pic.Height);
   finally
     buf.Free;
+    pic.Free;
+  end;
+end;
+
+procedure TGLTexture2D.LoadFromFile(const APath: String; LoadFlipped: Boolean);
+var
+  Bit: TBitmap;
+begin
+  Bit := TBitmap.CreateFromFile(APath);
+  try
+    LoadFromBitmap(Bit, LoadFlipped);
+  finally
+    Bit.Free;
+  end;
+end;
+
+procedure TGLTexture2D.LoadFromRawStream(AStream: TMemoryStream; ColorMode: GLuint;
+  InternalMode: TGLBufferType; Width, Height: Cardinal);
+begin
+  if AStream.Size < Width * Height then
+    raise Exception.Create('Stream too small');
+
+  Activate;
+
+  glTexImage2D(GL_TEXTURE_2D, 0, Ord(InternalMode), Width, Height,
+    0, ColorMode, GL_UNSIGNED_BYTE, AStream.Memory);
+  fType := InternalMode;
+  // default texture filtering. Without it textures will be black
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  Deactivate;
+end;
+
+procedure TGLTexture2D.LoadFromStream(AStream: TStream; LoadFlipped: Boolean);
+var
+  pic: TBitmap;
+begin
+  pic := TBitmap.CreateFromStream(AStream);
+  try
+    LoadFromBitmap(pic, LoadFlipped);
+  finally
     pic.Free;
   end;
 end;
@@ -1197,8 +1333,7 @@ end;
 function TGLFramebuffer.GetAttachmentType(InternalFormat: TGLBufferType): TGLAttachementType;
 begin
   case InternalFormat of
-  btDepth24Stencil8:
-    Result := atDepthStencil;
+  btDepthStencil: Result := atDepthStencil;
   else Result := atColor0;
   end;
 end;
@@ -1280,6 +1415,107 @@ end;
 constructor TGLShaderList.Create(ACapacity: Integer);
 begin
   inherited Create([doOwnsValues], ACapacity);
+end;
+
+{$ENDREGION}
+
+{$REGION 'TGLTextRenderer'}
+
+constructor TGLTextRenderer.Create;
+begin
+  fCharList := TDictionary<Char, TFreeTypeChar>.Create;
+  fTextureList := TGLTextureList.Create;
+  
+  fShader := TGLShader.Create;
+  fShader.LoadFromSources(vertexShader, fragmentShader);
+  fShader.SetInt('tex', 0);
+  
+  fModel := TGLMesh.Create;
+  fModel.LoadFromArray(quadMesh, [texture]);
+end;
+
+destructor TGLTextRenderer.Destroy;
+begin
+  fCharList.Free;
+  fTextureList.Free;
+  fShader.Free;
+  fModel.Free;
+  inherited;
+end;
+
+procedure TGLTextRenderer.RegisterChars(Chars: String; resolutionDPI: Word; Size: Cardinal;
+  AFontFile: String);
+var
+  ft: TFreeType;
+  c: Char;
+  e: TPair<Char, TFreeTypeChar>;
+  bitPointer: TBitmapData;
+  i: Integer;
+  gltex: TGLTexture;
+  mbuf: TMemoryStream;
+begin
+  ft := TFreeType.CreateFromFile(AFontFile);
+  try
+    ft.PixelSize := Size;
+    for c in Chars do
+      fCharList.TryAdd(c, ft.GetChar(c, resolutionDPI));
+  finally
+    ft.Free;
+  end;
+
+  mbuf := TMemoryStream.Create;
+  try 
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    for e in fCharList do
+    begin
+      mbuf.Clear;
+      for i := e.Value.Height - 1 downto 0 do
+        mbuf.Write(e.Value.BitmapData[i * e.Value.Width], e.Value.Width);
+      
+      //mbuf.Write(e.Value.BitmapData, Length(e.Value.BitmapData));
+    
+      gltex := TGLTexture2D.CreateFromRawStream(mbuf, GL_RED, btRed, e.Value.Width, e.Value.Height);
+      if not fTextureList.TryAdd(e.Key, gltex) then
+        gltex.Free;
+    end;
+  finally
+    mbuf.Free;
+  end;
+end;
+
+procedure TGLTextRenderer.RenderText(AString: String; APosition: TVec2;
+  AColor: TVec3; AScale: Single = 1);
+var
+  c: Char;
+  ci: TFreeTypeChar;
+  pos: TVec2;
+begin
+  fShader.Use; 
+  fShader.SetVec3('color', AColor);
+
+  for c in AString do
+  begin
+    if c <> ' ' then
+    begin
+      ci := fCharList[c];
+      pos.x := APosition.x + ci.BearingX * AScale;
+      pos.y := APosition.y - (ci.Height - ci.BearingY) * AScale;
+      fShader.SetMat4('scale', IdentityMat.Scale(ci.Width * AScale, ci.Height * AScale, 1));
+      fShader.SetMat4('position', IdentityMat.Translate(pos));
+      fTextureList[c].Activate(0);
+      fModel.Draw;
+    end;
+    APosition.x := APosition.x + ci.Advance * AScale;
+  end;
+
+  fShader.Leave;   
+end;
+
+procedure TGLTextRenderer.SetDrawSize(Left, Right, Bottom, Top: Single);
+begin
+  fShader.Use;
+  fShader.SetMat4('projection', TMat4.Ortho(Left, Right, Bottom, Top, 0, 1));  
+  fShader.Leave;
 end;
 
 {$ENDREGION}
