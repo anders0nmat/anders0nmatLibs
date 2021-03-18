@@ -13,7 +13,7 @@
 * **FreetypeDelphi.pas (along with FreetypeDelphi.dllImports.pas and freetype32.dll and freetype64.dll)**  
 	A **very** incomplete implementation of the [FreeType2 Library](https://www.freetype.org/) currently bound to the use of DLLs. Also some Delphi OOP Wrapper for easy use. Can load Chars with placement and image data from ttf (and all other freetype supported file types) file or stream.  
 * **lz4d.pas (and some other lz4 files)**  
-	[LZ4](https://lz4.github.io/lz4/) implementation from [this guy](https://github.com/Hugie/lz4-delphi)  
+	[LZ4](https://lz4.github.io/lz4/) implementation from [this guy](https://github.com/Hugie/lz4-delphi) [License](https://github.com/Hugie/lz4-delphi/blob/master/LICENSE)  
 * **NeoControl.pas**  
 	For controlling an [ESP8266](https://en.wikipedia.org/wiki/ESP8266) with some custom code via WiFi Network (Including LED effects :O)  
 * **ObjectGL.pas**  
